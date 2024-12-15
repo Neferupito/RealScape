@@ -25,6 +25,76 @@ void** matrix2d_new( size_t esize, size_t ealign, size_t idim, size_t jdim ) {
 int is_within_bounds(int i, int j, int rows, int cols) {
     return (i >= 0 && i< rows && j >= 0 && j < cols);
 }
+
+
+void D8_update(int r, int c, float dx, float dy, float rain, float z[r][c], int d8_direction_map[r][c], float d8_slope_map[r][c], float h_water[r][c]) {
+  int i,j;
+  int neighbour_i, neighbour_j, neighbour_id;
+  int max_id, max_i, max_j;
+  int max_neighbour_id;
+  float max_slope, neighbour_slope;
+  float d8_distances[8] = {dy, sqrt(dx*dx + dy*dy), dx, sqrt(dx*dx + dy*dy), dy, sqrt(dx*dx + dy*dy), dx, sqrt(dx*dx + dy*dy)};
+  int d8_directions[8][2] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}};
+  float h_water_tampon[r][c];
+
+  // Set grids
+  for (i = 0; i < r; i++) {
+      for (j = 0; j < c; j++) {
+          h_water_tampon[i][j] = h_water[i][j] + rain;
+          h_water[i][j] = 0;
+          d8_direction_map[i][j] = -1;
+          d8_slope_map[i][j] = -1;
+      }
+  }
+
+  // Update the grid
+  for (i = 0; i < r; i++) {
+      for (j = 0; j < c; j++) {
+          if (h_water_tampon[i][j] > 0) {
+              // Check the 8 neighbors
+              max_slope = 0;
+              for (neighbour_id = 0; neighbour_id < 8; neighbour_id++) {
+                  neighbour_i = i + d8_directions[neighbour_id][0];
+                  neighbour_j = j + d8_directions[neighbour_id][1];
+                  
+                  // Ensure the neighbor is within bounds
+                  if (is_within_bounds(neighbour_i, neighbour_j, r, c)) {
+                      // Calculate the difference in elevation
+                      neighbour_slope = (z[i][j] - z[neighbour_i][neighbour_j])/d8_distances[neighbour_id];
+                      
+                      // Find the steepest slope
+                      if (neighbour_slope > max_slope) {
+                          max_slope = neighbour_slope;
+                          max_id = neighbour_id;
+                          max_i = neighbour_i;
+                          max_j = neighbour_j;
+                      }
+                  }
+              }
+              if (max_slope > 0) {
+                  d8_direction_map[i][j] = max_id;
+                  d8_slope_map[i][j] = max_slope;
+                  h_water[max_i][max_j] += h_water_tampon[i][j];
+              }
+          }
+      }
+  }
+}
+
+void update_topo(int r, int c, float dx, float dy, float power_coef, float erosion_strength, float deposition_strength, float diffusion_coef, float z[r][c], int d8_direction_map[r][c], float d8_slope_map[r][c], float h_water[r][c]) {
+  int i,j;
+  for (i = 1; i < r-1; i++) {
+      for (j = 1; j < c-1; j++) {
+          z[i][j] += diffusion_coef*(z[i][j+1] - 2*z[i][j] + z[i][j-1])/(pow(dx,2)) + diffusion_coef*(z[i+1][j] - 2*z[i][j] + z[i-1][j])/pow(dy,2);
+          if (d8_direction_map[i][j] <= 0 && h_water[i][j] > 0) {
+              z[i][j] += deposition_strength ;
+          }
+          else if (d8_direction_map[i][j] > 0 && h_water[i][j] > 0) {
+              z[i][j] -=  pow(d8_slope_map[i][j],power_coef)* h_water[i][j]*erosion_strength;
+          }
+      }
+  }
+} 
  
     
 int main() {
@@ -34,8 +104,7 @@ int main() {
     
     // Simulation parameters
     int  iter, iter_max; // Control iterations
-    float deposition_scale, erosion_scale, rain_scale; // Deposition erosion and rain scales (relative to dZ)
-    float rain_amp; // Deposition erosion and rain amplitudes
+    float deposition_scale, erosion_scale, rain, diffusion_coef, power_coef, erosion_strength, deposition_strength; // Deposition erosion and rain
     
     // Topo grid parameters
     int r = 300, c = 300; // Number of rows and columns
@@ -45,23 +114,20 @@ int main() {
     float max_x, max_y, max_z, min_x, min_y, min_z; // Store min/max values
     float dx, dy; // Store dx and dy
     float x[r][c], y[r][c], z[r][c]; // x, y and z grids
-    float h_old[r][c], h_new[r][c]; // h_old and h_new grids
+    float h_water[r][c]; // water height grid
 
     // D8 algorithm parameters
-    int neighbour_i, neighbour_j, neighbour_id; // Neighbour indices and id 
-    int max_id, max_i, max_j; // Store id i, j for max slope
-    int d8_directions[8][2] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}}; // D8 neighbour direction
     int d8_direction_map[r][c]; //D8 direction map
-    float max_slope; // Store max slope
-    float neighbour_slope; // Neighbour slope;
     float d8_slope_map[r][c]; // D8 slope map
     
     // Initialize parameters 
-    iter_max = 2000;
-    deposition_scale = 0.001;
-    erosion_scale = 0.001;
-    rain_scale = 0.0001;
-    float D = 0.00000001;
+    iter_max = 500;
+    rain = 0.00001;
+    diffusion_coef = 0.00000001;
+    power_coef = 0.5;
+    erosion_strength = 0.1;
+    deposition_strength = 0.001;
+
     // Start the clock
     clock_t start_time = clock();
     
@@ -89,54 +155,33 @@ int main() {
         j = line / c;
 
         x[i][j] = x_file;
-        if (max_x < x[i][j]) {
-            max_x = x[i][j];
-        }
-        if (min_x > x[i][j]) {
-            min_x = x[i][j];
-        }
+        if (max_x < x[i][j]) {max_x = x[i][j];}
+        if (min_x > x[i][j]) {min_x = x[i][j];}
         y[i][j] = y_file;
-        if (max_y < y[i][j]) {
-            max_y = y[i][j];
-        }
-        if (min_y > y[i][j]) {
-            min_y = y[i][j];
-        }
+        if (max_y < y[i][j]) {max_y = y[i][j];}
+        if (min_y > y[i][j]) {min_y = y[i][j];}
         z[i][j] = z_file;
-        if (max_z < z[i][j]) {
-            max_z = z[i][j];
-        }
-        if (min_z > z[i][j]) {
-            min_z = z[i][j];
-        }
+        if (max_z < z[i][j]) {max_z = z[i][j];}
+        if (min_z > z[i][j]) {min_z = z[i][j];}
         line++;
     }
     
-    // Normalize x y z grids
+    // Normalize x y z grids and init grids
     for (i = 0; i < r; i++) {
         for (j = 0; j < c; j++) {
+            // Normalize
             x[i][j] = (x[i][j] - min_x) / (max_x - min_x);
             y[i][j] = (y[i][j] - min_y) / (max_y - min_y);
             z[i][j] = (z[i][j] - min_z) / (max_z - min_z);
+            // Init
+            h_water[i][j] = rain;
+            d8_direction_map[i][j] = -1;
+            d8_slope_map[i][j] = -1;
         }
     }
     
     dx = x[0][1] - x[0][0];
     dy = y[1][0] - y[0][0];
-    printf("dx: %f, dy: %f\n", dx, dy);
-
-    float d8_distances[8] = {dy, sqrt(dx*dx+dy*dy), dx, sqrt(dx*dx+dy*dy), dy, sqrt(dx*dx+dy*dy), dx, sqrt(dx*dx+dy*dy)}; // D8 distance map
-    
-    // Define deposition, erosion and rain amplitudes
-    rain_amp = (max_z - min_z)*rain_scale;
-
-    for (i = 0; i < r; i++) {
-        for (j = 0; j < c; j++) {
-            h_new[i][j] = 0.00001;
-            d8_direction_map[i][j] = -1;
-            d8_slope_map[i][j] = -1;
-        }
-    }
 
     // Close the file
     fclose(file_in_id);
@@ -144,52 +189,8 @@ int main() {
     iter = 0;
     while (iter < iter_max) {
         //printf("Iteration: %d\n", iter);
-        for (i = 1; i < r-1; i++) {
-            for (j = 1; j < c-1; j++) {
-                z[i][j] += D*(z[i][j+1] - 2*z[i][j] + z[i][j-1])/(pow(dx,2)) + D*(z[i+1][j] - 2*z[i][j] + z[i-1][j])/pow(dy,2);
-                if (d8_direction_map[i][j] <= 0) {
-                    z[i][j] += 0 ; //* h_old[i][j];
-                }
-                else {
-                    z[i][j] -=  d8_slope_map[i][j]* h_new[i][j]*0.1;
-                }
-                h_old[i][j] = h_new[i][j] + 0.00001;
-                h_new[i][j] = 0;
-                d8_direction_map[i][j] = -1;
-                d8_slope_map[i][j] = -1;
-            }
-        }
-        for (i = 0; i < r; i++) {
-            for (j = 0; j < c; j++) {
-                if (h_old[i][j] > 0) {
-                    // Check the 8 neighbors
-                    max_slope = 0;
-                    for (neighbour_id = 0; neighbour_id < 8; neighbour_id++) {
-                        neighbour_i = i + d8_directions[neighbour_id][0];
-                        neighbour_j = j + d8_directions[neighbour_id][1];
-                        
-                        // Ensure the neighbor is within bounds
-                        if (is_within_bounds(neighbour_i, neighbour_j, r, c)) {
-                            // Calculate the difference in elevation
-                            neighbour_slope = (z[i][j] - z[neighbour_i][neighbour_j])/d8_distances[neighbour_id];
-                            
-                            // Find the steepest slope
-                            if (neighbour_slope > max_slope) {
-                                max_slope = neighbour_slope;
-                                max_id = neighbour_id;
-                                max_i = neighbour_i;
-                                max_j = neighbour_j;
-                            }
-                        }
-                    }
-                    if (max_slope > 0) {
-                        d8_direction_map[i][j] = max_id;
-                        d8_slope_map[i][j] = max_slope;
-                        h_new[max_i][max_j] += h_old[i][j];
-                    }
-                }
-            }
-        }
+        D8_update(r, c, dx, dy, rain, z, d8_direction_map, d8_slope_map, h_water);
+        update_topo(r, c, dx, dy, power_coef, erosion_strength, deposition_strength, diffusion_coef, z, d8_direction_map, d8_slope_map, h_water);
         iter++;  
     } 
 
