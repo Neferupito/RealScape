@@ -5,132 +5,281 @@
 #include <time.h>
 #include <math.h>
 
-size_t round_up_to( size_t n, size_t multiple ) {
-  size_t const remainder = n % multiple;
-  return remainder == 0 ? n : n + multiple - remainder;
-}
-
-void** matrix2d_new( size_t esize, size_t ealign, size_t idim, size_t jdim ) {
-  // ensure &elements[0][0] is suitably aligned
-  size_t const ptrs_size = round_up_to( sizeof(void*) * idim, ealign );
-  size_t const row_size = esize * jdim;
-  // allocate the row pointers followed by the elements
-  void **const rows = malloc( ptrs_size + idim * row_size );
-  char *const elements = (char*)rows + ptrs_size;
-  for ( size_t i = 0; i < idim; ++i )
-    rows[i] = &elements[ i * row_size ];
-  return rows;
-}
 
 int is_within_bounds(int i, int j, int rows, int cols) {
     return (i >= 0 && i< rows && j >= 0 && j < cols);
 }
 
+void write_xyz_to_binary_file(int rows, int cols, float x[rows][cols], float y[rows][cols], float z[rows][cols], char filename[13]) {
+    // Open the file for binary writing
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        perror("Unable to open file for writing");
+        return;
+    }
 
-void D8_update(int r, int c, float dx, float dy, float rain, float z[r][c], int d8_direction_map[r][c], float d8_slope_map[r][c], float h_water[r][c]) {
+    // Loop through the grid and write X, Y, Z values
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            float X = x[i][j];    // X coordinate
+            float Y = y[i][j];    // Y coordinate
+            float Z = z[i][j];       // Z value as a function of X and Y (you can modify this)
+
+            // Write X, Y, Z as binary floats (4 bytes each)
+            if (fwrite(&X, sizeof(float), 1, file) != 1 || 
+                fwrite(&Y, sizeof(float), 1, file) != 1 || 
+                fwrite(&Z, sizeof(float), 1, file) != 1) {
+                perror("Error writing data to file");
+                fclose(file);
+                return;
+            }
+        }
+    }
+
+    // Close the file
+    fclose(file);
+    printf("Data written successfully to %s\n", filename);
+}
+
+void update_topo(int r, int c, float dx, float power_coef, float erosion_strength, float deposition_strength, float diffusion_coef, float z[r][c], float slope_map[r][c], float h_water[r][c]) {
   int i,j;
-  int neighbour_i, neighbour_j, neighbour_id;
-  int max_id, max_i, max_j;
-  int max_neighbour_id;
-  float max_slope, neighbour_slope;
-  float d8_distances[8] = {dy, sqrt(dx*dx + dy*dy), dx, sqrt(dx*dx + dy*dy), dy, sqrt(dx*dx + dy*dy), dx, sqrt(dx*dx + dy*dy)};
-  int d8_directions[8][2] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}};
-  float h_water_tampon[r][c];
+  for (i = 1; i < r-1; i++) {
+      for (j = 1; j < c-1; j++) {
+          z[i][j] += ((z[i][j+1] - 2*z[i][j] + z[i][j-1]) + (z[i+1][j] - 2*z[i][j] + z[i-1][j])) * diffusion_coef / pow(dx,2);
+          if (slope_map[i][j] <= 0 && h_water[i][j] > 0) {
+              z[i][j] += deposition_strength ;
+          }
+          else if (slope_map[i][j] > 0 && h_water[i][j] > 0) {
+            if (h_water[i][j] > 1){h_water[i][j] = 1;}
+              z[i][j] -=  pow(slope_map[i][j],power_coef)* pow(h_water[i][j],1)*erosion_strength;
+          }
+     }
+ } 
+} 
 
-  // Set grids
-  for (i = 0; i < r; i++) {
-      for (j = 0; j < c; j++) {
-          h_water_tampon[i][j] = h_water[i][j] + rain;
-          h_water[i][j] = 0;
-          d8_direction_map[i][j] = -1;
-          d8_slope_map[i][j] = -1;
+
+void Dinf_maps(int rows, int cols, float dx, float z[rows][cols], float dinf_slope_map[rows][cols], float dinf_split1[rows][cols], float dinf_split2[rows][cols], int dinf_split1_i[rows][cols], int dinf_split1_j[rows][cols],  int dinf_split2_i[rows][cols], int dinf_split2_j[rows][cols]) {
+  const float PI = 3.1415926;
+  float max_slope, r_max, e0, e1, e2, s1, s2, s, rg, r, alpha_high, alpha_low;
+  int dinf_directions[9][2] = {{0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}};
+  int dinf_directions_1[8][2] = {{0, 1}, {-1, 0}, {-1, 0}, {0, -1}, {0, -1}, {1, 0}, {1, 0}, {0, 1}};
+  int dinf_directions_2[8][2] = {{-1, 1}, {-1, 1}, {-1, -1}, {-1, -1}, {1, -1}, {1, -1}, {1, 1}, {1, 1}};
+  int ac[8] = {0, 1, 1, 2, 2, 3, 3, 4}, af[8] = {1, -1, 1, -1, 1, -1, 1, -1};
+  int neighbour_id, i,j,k, k_max, i_1, j_1, i_2, j_2;
+
+  // Update the grid
+  for (i = 0; i < rows; i++) {
+      for (j = 0; j < cols; j++) {
+          dinf_slope_map[i][j] = -1;
+          e0 = z[i][j];
+          max_slope = 0;
+          k_max = 0;
+          r_max = 0;
+          for (k = 0; k < 8; k++) {
+              i_1 = i + dinf_directions_1[k][0];
+              i_2 = i + dinf_directions_2[k][0];
+              j_1 = j + dinf_directions_1[k][1];
+              j_2 = j + dinf_directions_2[k][1];
+              // Ensure the neighbor is within bounds
+              if (is_within_bounds(i_1, j_1, rows, cols) && is_within_bounds(i_2, j_2, rows, cols)) {
+                  e1 = z[i_1][j_1];
+                  e2 = z[i_2][j_2];
+                  s1 = (e0 - e1) / dx;
+                  s2 = (e1 - e2) / dx;
+
+                  r = atan2(s2 , s1);  // Calculate angle based on slope
+                  s = sqrt(s1*s1 + s2*s2);  // Total slope
+
+                  // Boundary handling for steepest slope limits
+                  if (r < 0) {
+                    r = 0; 
+                    s = s1;
+                    }
+                  else if (r > atan2(dx , dx)) {
+                    r = atan2(dx, dx); 
+                    s = (e0 - e2) / (dx * sqrt(2));
+                    }
+
+                  if (s > max_slope) {
+                    max_slope = s; 
+                    k_max = k; 
+                    r_max = r;
+                  }
+              }
+          }
+          // Flow redistribution
+          if (max_slope > 0) {
+              rg = af[k_max] * r_max + ac[k_max]* PI / 2 ;
+              neighbour_id = rg / (PI/4);
+              alpha_high = (PI/4)*(neighbour_id+1) - rg;
+              alpha_low = rg - (PI/4)*neighbour_id;
+              dinf_slope_map[i][j] = max_slope;
+              dinf_split1[i][j] = alpha_low / (alpha_high + alpha_low);
+              dinf_split2[i][j] = alpha_high / (alpha_high + alpha_low);
+              dinf_split1_i[i][j] = i + dinf_directions[neighbour_id+1][0];
+              dinf_split2_i[i][j] = i + dinf_directions[neighbour_id][0];
+              dinf_split1_j[i][j] = j + dinf_directions[neighbour_id+1][1];
+              dinf_split2_j[i][j] = j + dinf_directions[neighbour_id][1];
+
+          }
       }
   }
+  
+}
+
+
+
+void Dinf_update_flow(int rows, int cols, float rain, float h_water[rows][cols], float dinf_slope_map[rows][cols], float dinf_split1[rows][cols], float dinf_split2[rows][cols], int dinf_split1_i[rows][cols], int dinf_split1_j[rows][cols], int dinf_split2_i[rows][cols], int dinf_split2_j[rows][cols]) {
+  int i,j;
+  float (*h_water_tampon)[cols] = malloc(rows * sizeof *h_water_tampon);
+  
+  for (i = 0; i < rows; i++) {
+      for (j = 0; j < cols; j++) {
+          h_water_tampon[i][j] = h_water[i][j] + rain;
+          h_water[i][j] = 0;
+      }
+  }
+
+  for (i = 0; i < rows; i++) {
+      for (j = 0; j < cols; j++) {
+        if (dinf_slope_map[i][j] > 1.e-7) {
+          h_water[dinf_split1_i[i][j]][dinf_split1_j[i][j]] += dinf_split1[i][j] * h_water_tampon[i][j];
+          h_water[dinf_split2_i[i][j]][dinf_split2_j[i][j]] += dinf_split2[i][j] * h_water_tampon[i][j];
+        }
+      }
+  }
+  free(h_water_tampon);
+}
+
+void Dinf_step(int rows, int cols, float dx, float rain, float z[rows][cols], float h_water[rows][cols], float power_coef, float erosion_strength, float deposition_strength, float diffusion_coef) {
+  float (*dinf_slope_map)[cols] = malloc(rows * sizeof *dinf_slope_map);
+  float (*dinf_split1)[cols] = malloc(rows * sizeof *dinf_split1);
+  float (*dinf_split2)[cols] = malloc(rows * sizeof *dinf_split2);
+  int (*dinf_split1_i)[cols] = malloc(rows * sizeof *dinf_split1_i);
+  int (*dinf_split1_j)[cols] = malloc(rows * sizeof *dinf_split1_j);
+  int (*dinf_split2_i)[cols] = malloc(rows * sizeof *dinf_split2_i);
+  int (*dinf_split2_j)[cols] = malloc(rows * sizeof *dinf_split2_j);
+  
+  Dinf_maps(rows, cols, dx, z, dinf_slope_map, dinf_split1, dinf_split2, dinf_split1_i, dinf_split1_j, dinf_split2_i, dinf_split2_j);
+  Dinf_update_flow(rows, cols, rain, h_water, dinf_slope_map,dinf_split1, dinf_split2, dinf_split1_i, dinf_split1_j, dinf_split2_i, dinf_split2_j);
+  update_topo(rows, cols, dx, power_coef, erosion_strength, deposition_strength, diffusion_coef, z, dinf_slope_map,  h_water);
+
+  free(dinf_slope_map);
+  free(dinf_split1);
+  free(dinf_split2);
+  free(dinf_split1_i);
+  free(dinf_split1_j);
+  free(dinf_split2_i);
+  free(dinf_split2_j);
+}
+
+void D8_maps(int r, int c, float dx, float z[r][c], float d8_slope_map[r][c], int d8_i[r][c], int d8_j[r][c]) {
+  int i,j;
+  int neighbour_i, neighbour_j, neighbour_id;
+  int max_i, max_j;
+  float max_slope, neighbour_slope;
+  float d8_distances[8] = {dx, dx * sqrt(2), dx, dx * sqrt(2), dx, dx * sqrt(2), dx, dx * sqrt(2)};
+  int d8_directions[8][2] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}};
 
   // Update the grid
   for (i = 0; i < r; i++) {
       for (j = 0; j < c; j++) {
-          if (h_water_tampon[i][j] > 0) {
-              // Check the 8 neighbors
-              max_slope = 0;
-              for (neighbour_id = 0; neighbour_id < 8; neighbour_id++) {
-                  neighbour_i = i + d8_directions[neighbour_id][0];
-                  neighbour_j = j + d8_directions[neighbour_id][1];
+          d8_slope_map[i][j] = -1;
+          // Check the 8 neighbors
+          max_slope = 0;
+          for (neighbour_id = 0; neighbour_id < 8; neighbour_id++) {
+              neighbour_i = i + d8_directions[neighbour_id][0];
+              neighbour_j = j + d8_directions[neighbour_id][1];
+              
+              // Ensure the neighbor is within bounds
+              if (is_within_bounds(neighbour_i, neighbour_j, r, c)) {
+                  // Calculate the difference in elevation
+                  neighbour_slope = (z[i][j] - z[neighbour_i][neighbour_j])/d8_distances[neighbour_id];
                   
-                  // Ensure the neighbor is within bounds
-                  if (is_within_bounds(neighbour_i, neighbour_j, r, c)) {
-                      // Calculate the difference in elevation
-                      neighbour_slope = (z[i][j] - z[neighbour_i][neighbour_j])/d8_distances[neighbour_id];
-                      
-                      // Find the steepest slope
-                      if (neighbour_slope > max_slope) {
-                          max_slope = neighbour_slope;
-                          max_id = neighbour_id;
-                          max_i = neighbour_i;
-                          max_j = neighbour_j;
-                      }
+                  // Find the steepest slope
+                  if (neighbour_slope > max_slope) {
+                      max_slope = neighbour_slope;
+                      max_i = neighbour_i;
+                      max_j = neighbour_j;
                   }
               }
-              if (max_slope > 0) {
-                  d8_direction_map[i][j] = max_id;
-                  d8_slope_map[i][j] = max_slope;
-                  h_water[max_i][max_j] += h_water_tampon[i][j];
-              }
+          }
+          if (max_slope > 0) {
+              d8_i[i][j] = max_i;
+              d8_j[i][j] = max_j;
+              d8_slope_map[i][j] = max_slope;
           }
       }
   }
 }
 
-void update_topo(int r, int c, float dx, float dy, float power_coef, float erosion_strength, float deposition_strength, float diffusion_coef, float z[r][c], int d8_direction_map[r][c], float d8_slope_map[r][c], float h_water[r][c]) {
+void D8_update_flow(int rows, int cols, float rain, float h_water[rows][cols], float d8_slope_map[rows][cols], int d8_i[rows][cols], int d8_j[rows][cols]) {
   int i,j;
-  for (i = 1; i < r-1; i++) {
-      for (j = 1; j < c-1; j++) {
-          z[i][j] += diffusion_coef*(z[i][j+1] - 2*z[i][j] + z[i][j-1])/(pow(dx,2)) + diffusion_coef*(z[i+1][j] - 2*z[i][j] + z[i-1][j])/pow(dy,2);
-          if (d8_direction_map[i][j] <= 0 && h_water[i][j] > 0) {
-              z[i][j] += deposition_strength ;
-          }
-          else if (d8_direction_map[i][j] > 0 && h_water[i][j] > 0) {
-              z[i][j] -=  pow(d8_slope_map[i][j],power_coef)* h_water[i][j]*erosion_strength;
-          }
+  float (*h_water_tampon)[cols] = malloc(rows * sizeof *h_water_tampon);
+  for (i = 0; i < rows; i++) {
+      for (j = 0; j < cols; j++) {
+          h_water_tampon[i][j] = h_water[i][j] + rain;
+          h_water[i][j] = 0;
       }
   }
-} 
- 
+
+  for (i = 0; i < rows; i++) {
+      for (j = 0; j < cols; j++) {
+        if (d8_slope_map[i][j] > 0) {
+          h_water[d8_i[i][j]][d8_j[i][j]] +=  h_water_tampon[i][j];
+        }
+      }
+  }
+  free(h_water_tampon);
+}
+
+void D8_step(int rows, int cols, float dx, float rain, float z[rows][cols], float h_water[rows][cols], float power_coef, float erosion_strength, float deposition_strength, float diffusion_coef) {
+  float (*d8_slope_map)[cols] = malloc(rows * sizeof *d8_slope_map);
+  int (*d8_i)[cols] = malloc(rows * sizeof *d8_i);
+  int (*d8_j)[cols] = malloc(rows * sizeof *d8_j);
+  
+  D8_maps(rows, cols, dx, z, d8_slope_map, d8_i, d8_j);
+  D8_update_flow(rows, cols, rain, h_water, d8_slope_map, d8_i, d8_j);
+  update_topo(rows, cols, dx, power_coef, erosion_strength, deposition_strength, diffusion_coef, z, d8_slope_map,  h_water);
+
+  free(d8_slope_map);
+  free(d8_i);
+  free(d8_j);
+}
     
 int main() {
-    
+
     // InOut
-    char file_in[] = "file.xyz", file_out[] = "file_out.xyz"; // Change this to your file name
+    char file_in[] = "file.xyz", file_out[] = "file_out.bin"; // Change this to your file name
     
     // Simulation parameters
     int  iter, iter_max; // Control iterations
     float deposition_scale, erosion_scale, rain, diffusion_coef, power_coef, erosion_strength, deposition_strength; // Deposition erosion and rain
     
     // Topo grid parameters
-    int r = 300, c = 300; // Number of rows and columns
+    int r = 400, c = 400; // Number of rows and columns
     int i, j; // Loop counters
     int line; // Read file line number
     float x_file, y_file, z_file; // Store fscanf values
     float max_x, max_y, max_z, min_x, min_y, min_z; // Store min/max values
     float dx, dy; // Store dx and dy
-    float x[r][c], y[r][c], z[r][c]; // x, y and z grids
-    float h_water[r][c]; // water height grid
 
-    // D8 algorithm parameters
-    int d8_direction_map[r][c]; //D8 direction map
-    float d8_slope_map[r][c]; // D8 slope map
-    
+    float (*x)[c] = malloc(r * sizeof *x);
+    float (*y)[c] = malloc(r * sizeof *y);
+    float (*z)[c] = malloc(r * sizeof *z);
+    float (*h_water)[c] = malloc(r * sizeof *h_water);
+
     // Initialize parameters 
-    iter_max = 500;
+    iter_max = 10000;
     rain = 0.00001;
-    diffusion_coef = 0.00000001;
+    diffusion_coef = 0.000000000;
     power_coef = 0.5;
-    erosion_strength = 0.1;
+    erosion_strength = 0.0001;
     deposition_strength = 0.001;
 
     // Start the clock
     clock_t start_time = clock();
-    
+
     // Set file_in pointer
     FILE *file_in_id;
 
@@ -165,6 +314,9 @@ int main() {
         if (min_z > z[i][j]) {min_z = z[i][j];}
         line++;
     }
+
+    // Close the file
+    fclose(file_in_id);
     
     // Normalize x y z grids and init grids
     for (i = 0; i < r; i++) {
@@ -175,22 +327,17 @@ int main() {
             z[i][j] = (z[i][j] - min_z) / (max_z - min_z);
             // Init
             h_water[i][j] = rain;
-            d8_direction_map[i][j] = -1;
-            d8_slope_map[i][j] = -1;
         }
     }
     
     dx = x[0][1] - x[0][0];
     dy = y[1][0] - y[0][0];
-
-    // Close the file
-    fclose(file_in_id);
     
     iter = 0;
     while (iter < iter_max) {
         //printf("Iteration: %d\n", iter);
-        D8_update(r, c, dx, dy, rain, z, d8_direction_map, d8_slope_map, h_water);
-        update_topo(r, c, dx, dy, power_coef, erosion_strength, deposition_strength, diffusion_coef, z, d8_direction_map, d8_slope_map, h_water);
+        //Dinf_step(r, c, dx, rain, z, h_water, power_coef, erosion_strength, deposition_strength, diffusion_coef);
+        D8_step(r, c, dx, rain, z, h_water, power_coef, erosion_strength, deposition_strength, diffusion_coef);
         iter++;  
     } 
 
@@ -203,25 +350,7 @@ int main() {
         }
     }
 
-    FILE *file_out_id = fopen(file_out, "w");
-
-    if (file_out_id == NULL) {
-        printf("Error opening file.\n");
-        return 1;
-    }
-
-    // Write the X, Y, Z grid values to the file
-    for (j = 0; j < c; j++) {
-        for (i = 0; i < r; i++) {
-            // Write X, Y, Z coordinates to the file
-            fprintf(file_out_id, "%f %f %f\n", x[i][j], y[i][j], z[i][j]);
-        }
-    }
-
-    // Close the file
-    fclose(file_out_id);
-
-    printf("Data written to output.xyz\n");
+    write_xyz_to_binary_file(r, c, x, y, z, file_out);
 
     // End the clock
     clock_t end_time = clock();
