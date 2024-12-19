@@ -247,18 +247,13 @@ void D8_step(int rows, int cols, float dx, float rain, float z[rows][cols], floa
   free(d8_j);
 }
     
-int main() {
-
-    // InOut
-    char file_in[] = "file.xyz", file_out[] = "file_out.bin"; // Change this to your file name
+int main(int r, int c, int iter_max, float rain, float power_coef, float erosion_strength, float deposition_strength, float diffusion_coef) {
     
-    // Simulation parameters
-    int  iter, iter_max; // Control iterations
-    float deposition_scale, erosion_scale, rain, diffusion_coef, power_coef, erosion_strength, deposition_strength; // Deposition erosion and rain
+    // InOut
+    char file_in[] = "../inout/in.xyz", file_out[] = "../inout/out.bin"; // Change this to your file name
     
     // Topo grid parameters
-    int r = 400, c = 400; // Number of rows and columns
-    int i, j; // Loop counters
+    int i, j, iter; // Loop counters
     int line; // Read file line number
     float x_file, y_file, z_file; // Store fscanf values
     float max_x, max_y, max_z, min_x, min_y, min_z; // Store min/max values
@@ -268,14 +263,6 @@ int main() {
     float (*y)[c] = malloc(r * sizeof *y);
     float (*z)[c] = malloc(r * sizeof *z);
     float (*h_water)[c] = malloc(r * sizeof *h_water);
-
-    // Initialize parameters 
-    iter_max = 10000;
-    rain = 0.00001;
-    diffusion_coef = 0.000000000;
-    power_coef = 0.5;
-    erosion_strength = 0.0001;
-    deposition_strength = 0.001;
 
     // Start the clock
     clock_t start_time = clock();
